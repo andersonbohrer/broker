@@ -3,6 +3,8 @@ from tkinter import ttk
 import paho.mqtt.client as mqtt
 
 BROKER, PORT = "3e533850c6644a06ac4bf2bfe62a37f3.s1.eu.hivemq.cloud", 8883
+MQTT_USERNAME = "abohrer"  # Seu usuário do HiveMQ
+MQTT_PASSWORD = "SENHA"  # << IMPORTANTE: Substitua pela sua senha
 TEMP_TOPIC   = "esp32/temperatura"
 
 DEVICES = {               # nome → tópico base (Tasmota “Topic”)
@@ -176,8 +178,7 @@ class MqttGui:
     def _mqtt_loop(self):
         while True:
             try:
-                # Descomente a linha abaixo e substitua com suas credenciais MQTT:
-                # self.client.username_pw_set("SEU_USUARIO", "SUA_SENHA")
+                self.client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
                 self.client.connect(BROKER, PORT, 60)
                 self.client.loop_forever()
             except Exception as e:
