@@ -65,7 +65,7 @@ class MqttGui:
         for t in DEVICES.values():
             client.subscribe(f"stat/{t}/#")
             client.subscribe(f"tele/{t}/#")   # <- novo
-            client.publish(f"cmnd/{t}/state", "")
+            client.publish(f"cmnd/{t}/state", "") # Request current state on connect
 
     def on_message(self, client, userdata, msg):
         tpc = msg.topic
@@ -74,43 +74,110 @@ class MqttGui:
         # temperatura
         if tpc == TEMP_TOPIC:
             self.root.after(0, self.temp_var.set, raw)
-            return
+            try:
+                temp_value = float(raw)
+                if "sonoff1" in DEVICES:
+                    target_topic = f"cmnd/{DEVICES['sonoff1']}/POWER1"
+                    # It's better to check the actual device state if possible,
+                    # but for simplicity, we'll rely on the GUI label state.
+                    # This might lead to redundant commands if the GUI state is not perfectly in sync.
+                    current_power_state_label = self.status_labels.get("sonoff1")
+                    current_power_state = None
+                    if current_power_state_label:
+                        bg_color = current_power_state_label.cget("bg")
+                        if bg_color == "green":
+                            current_power_state = "ON"
+                        elif bg_color == "red":
+                            current_power_state = "OFF"
 
-        # filtra stat/… ou tele/…
+                    if temp_value < 10:
+                        if current_power_state != "ON":
+                            logging.info(f"Temperatura {temp_value}°C < 10°C. Ligando POWER1.")
+                            self.client.publish(target_topic, "ON")
+                        # else:
+                        #     logging.info(f"Temperatura {temp_value}°C < 10°C, POWER1 já está ON.")
+                    elif temp_value > 15:
+                        if current_power_state != "OFF":
+                            logging.info(f"Temperatura {temp_value}°C > 15°C. Desligando POWER1.")
+                            self.client.publish(target_topic, "OFF")
+                        # else:
+                        #     logging.info(f"Temperatura {temp_value}°C > 15°C, POWER1 já está OFF.")
+                else:
+                    logging.warning("Dispositivo 'sonoff1' não encontrado no mapeamento DEVICES.")
+            except ValueError:
+                logging.warning(f"Valor de temperatura inválido recebido: {raw}")
+            except Exception as e:
+                logging.error(f"Erro ao processar atualização de temperatura: {e}")
+            return # Important: return after processing temperature
+
+        # filtra stat/… ou tele/… (para outros dispositivos)
         parts = tpc.split("/")
         if len(parts) < 3 or parts[0] not in ("stat", "tele"):
             return
-        dev = parts[1]
+        dev_name_from_topic = parts[1]
 
-        # tenta achar estado ON/OFF
+        # Encontra o nome do dispositivo em DEVICES que corresponde ao tópico base
+        device_key = None
+        for key, topic_base in DEVICES.items():
+            if topic_base == dev_name_from_topic:
+                device_key = key
+                break
+
+        if not device_key:
+            # logging.debug(f"Tópico recebido para dispositivo não mapeado em DEVICES: {dev_name_from_topic}")
+            return
+
+        # tenta achar estado ON/OFF para o dispositivo
         state = None
-        if raw.upper() in ("ON", "OFF"):
+        if raw.upper() in ("ON", "OFF"): # Direct ON/OFF state
             state = raw.upper()
-        else:
+        else: # Check for JSON payload like Tasmota's STATE or RESULT
             try:
                 j = json.loads(raw)
-                for k in ("POWER1", "POWER"):
-                    if k in j:
-                        state = j[k].upper(); break
+                # Tasmota sends status in messages like:
+                # tele/sonoff1/STATE = {"Time":"...","POWER1":"ON",...}
+                # stat/sonoff1/RESULT = {"POWER1":"ON"}
+                # stat/sonoff1/POWER1 = ON (older versions or specific commands)
+                for k_json in ("POWER1", "POWER"): # Check common keys for power state
+                    if k_json in j:
+                        state = j[k_json].upper()
+                        break
             except json.JSONDecodeError:
+                # Not a JSON, or not the JSON we expect
                 pass
+            except Exception as e:
+                logging.error(f"Erro ao decodificar JSON de {device_key}: {raw} - {e}")
 
-        if state in ("ON", "OFF") and dev in self.status_labels:
+
+        if state in ("ON", "OFF") and device_key in self.status_labels:
             colour = "green" if state == "ON" else "red"
-            self.root.after(0, self.status_labels[dev].config, {"bg": colour})
+            # Update GUI from the main thread
+            self.root.after(0, self.status_labels[device_key].config, {"bg": colour})
+            # Log state change
+            # logging.info(f"Estado de {device_key} ({dev_name_from_topic}) atualizado para: {state}")
+
 
     # ---------- helpers ----------
     def publish(self, payload):
-        dev = self.selected_device.get()
-        topic = f"cmnd/{DEVICES[dev]}/POWER1"
-        try:
-            self.client.publish(topic, payload)
-        except Exception as e:
-            self._set_status(f"Falha: {e}")
+        dev_key = self.selected_device.get() # This is the key from DEVICES like "sonoff1"
+        if dev_key in DEVICES:
+            topic_base = DEVICES[dev_key] # This is the topic part like "sonoff1"
+            # Always target POWER1 for ON/OFF buttons as per typical Tasmota setup for single-relay devices
+            topic = f"cmnd/{topic_base}/POWER1"
+            try:
+                logging.info(f"Publicando '{payload}' para '{topic}'")
+                self.client.publish(topic, payload)
+            except Exception as e:
+                self._set_status(f"Falha ao publicar: {e}")
+        else:
+            logging.error(f"Dispositivo selecionado '{dev_key}' não encontrado em DEVICES.")
+
 
     def _mqtt_loop(self):
         while True:
             try:
+                # Descomente a linha abaixo e substitua com suas credenciais MQTT:
+                # self.client.username_pw_set("SEU_USUARIO", "SUA_SENHA")
                 self.client.connect(BROKER, PORT, 60)
                 self.client.loop_forever()
             except Exception as e:
@@ -118,10 +185,23 @@ class MqttGui:
                 time.sleep(5)
 
     def _set_status(self, txt):
+        logging.info(f"Status MQTT: {txt}")
         self.root.after(0, self.status_var.set, txt)
 
 # ---------- run ----------
-root = tk.Tk()
-root.tk_setPalette(background="#f0f0f0")
-MqttGui(root)
-root.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.tk_setPalette(background="#f0f0f0")
+    app = MqttGui(root)
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        logging.info("Aplicação encerrada pelo usuário.")
+    finally:
+        if hasattr(app, 'client') and app.client.is_connected():
+            logging.info("Desconectando cliente MQTT...")
+            app.client.disconnect()
+            # Allow some time for disconnect to complete
+            # Note: loop_stop() might be needed if not using loop_forever in a thread that is gracefully shut down.
+            # However, since loop_forever is used, disconnect() should be enough.
+        logging.info("Programa finalizado.")
